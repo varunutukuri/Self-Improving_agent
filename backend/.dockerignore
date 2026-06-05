@@ -1,0 +1,17 @@
+# Never bake secrets into the Docker image
+.env
+*.env
+
+# Python junk
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+*.egg-info/
+
+# Editor
+.vscode/
+.idea/
+
+# OS
+.DS_Store

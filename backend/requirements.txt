@@ -2,6 +2,7 @@ openai
 fastapi
 uvicorn[standard]
 aiomysql
+cryptography
 sentence-transformers
 scikit-learn
 numpy
