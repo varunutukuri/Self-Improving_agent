@@ -48,6 +48,7 @@ class AgentContext:
     current_tests:     Optional[str] = None
     current_error:     Optional[str] = None
     current_analysis:  Optional[str] = None
+    current_memories:  list = field(default_factory=list)
     iteration_history: list[IterationSummary] = field(default_factory=list)
     max_iterations:    int = 5
 

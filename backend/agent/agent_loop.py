@@ -54,11 +54,14 @@ async def run_agent(
         # ------------------------------------------------------------------ #
         # Stage 1: Generate code via streaming LLM call                       #
         # ------------------------------------------------------------------ #
-        yield {"type": "status", "iteration": iteration, "message": "Generating code..."}
+        if iteration == 1:
+            yield {"type": "status", "iteration": iteration, "message": "Generating code..."}
+            system, user = context.build_generator_prompt()
+        else:
+            yield {"type": "status", "iteration": iteration, "message": "Generating fix..."}
+            system, user = context.build_patcher_prompt(context.current_memories)
 
-        system, user = context.build_generator_prompt()
         full_response = ""
-
         async for token in call_llm_stream(system, user):
             full_response += token
             yield {"type": "token", "iteration": iteration, "token": token}
@@ -102,6 +105,7 @@ async def run_agent(
         relevant_memories = await get_relevant_memories(
             test_result.output, error_embedding, pool
         )
+        context.current_memories = relevant_memories
         similarity_score = relevant_memories[0]["similarity"] if relevant_memories else None
 
         # Emit the iteration result immediately so the UI card appears
@@ -148,14 +152,8 @@ async def run_agent(
         }
 
         # ------------------------------------------------------------------ #
-        # Stage 5: Generate a patch using the analysis as context             #
+        # Stage 5: Record history & save to memory store                     #
         # ------------------------------------------------------------------ #
-        yield {"type": "status", "iteration": iteration, "message": "Generating fix..."}
-
-        sys_p, usr_p = context.build_patcher_prompt(relevant_memories)
-        patched_response = await call_llm(sys_p, usr_p, model="gpt-4o")
-        patched_code, patched_tests = context.parse_llm_response(patched_response)
-
         # Persist the error + attempted fix in the memory store
         await save_memory(
             error_text=test_result.output,
@@ -167,16 +165,12 @@ async def run_agent(
             root_cause=root_cause,
         )
 
-        # Record what was tried so the generator prompt can reference it
+        # Record what was tried so the next patcher prompt can reference it
         context.update_history(
             error_type=test_result.error_type,
             fix_attempted=root_cause[:_HISTORY_TEXT_MAX_CHARS],
             result="failed",
         )
-
-        # Apply the patched code so the next iteration builds on the fix
-        context.current_code  = patched_code
-        context.current_tests = patched_tests
 
     # All iterations exhausted without a passing result
     yield {
