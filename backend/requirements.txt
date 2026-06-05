@@ -1,0 +1,10 @@
+openai
+fastapi
+uvicorn[standard]
+aiomysql
+sentence-transformers
+scikit-learn
+numpy
+python-dotenv
+pytest
+pytest-asyncio
