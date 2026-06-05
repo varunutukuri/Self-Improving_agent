@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
 # Load .env values before the client is constructed so OPENAI_API_KEY is set.
-load_dotenv(override=True)
+load_dotenv()
 
 # Single shared client — AsyncOpenAI is safe to share across coroutines.
 _client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
