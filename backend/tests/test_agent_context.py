@@ -20,7 +20,10 @@ def test_build_analyzer_prompt_no_memories():
     ctx.current_code = "def sort(x): return x"
     ctx.current_error = "AssertionError: assert [3,1] == [1,3]"
     system, user = ctx.build_analyzer_prompt([])
-    assert "root cause" in system.lower()
+    # The new prompt requests structured JSON with error_class / root_cause / fix_hint
+    assert "error_class" in system
+    assert "root_cause" in system
+    assert "fix_hint" in system
     assert "Sort task" in user
     assert "AssertionError" in user
 
