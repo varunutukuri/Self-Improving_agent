@@ -1,0 +1,228 @@
+# Self-Improving Code Agent (AIDEN) — Full Review
+
+**Verdict up front:** this is a genuinely strong project and the most conceptually ambitious thing on your resume. The architecture is clean, the memory layer is a real idea rather than a wrapper around an API, and the code is documented to a standard most student projects never reach. All 21 tests pass, 87% coverage on the agent and db packages.
+
+Unlike the RAG project, there are **no inflated claims to correct** — because you haven't written resume bullets for it yet. Section 4 is instead about which claims you *can* safely make, and the two words to avoid.
+
+The one real risk is the security posture of the code executor. Section 3 covers it, and Section 6 tells you exactly how to answer when an interviewer asks — because they will.
+
+---
+
+## 1. What it is
+
+An agent that takes a natural-language coding task, writes Python plus its own pytest tests, runs them in a subprocess, and — on failure — diagnoses the root cause and rewrites the code. Every failure is embedded and stored, so recurring error patterns are recognised on future runs.
+
+```
+Task ──▶ GENERATOR (gpt-4o, streaming) ──▶ ## CODE / ## TESTS parsed
+                  ▲                                  │
+                  │                                  ▼
+                  │                    run_tests() — pytest in tempdir
+                  │                          (timeout=30s)
+                  │                                  │
+                  │                    ┌─────────────┴─────────────┐
+                  │                 passed                       failed
+                  │                    │                           │
+                  │              emit "complete"                   ▼
+                  │                                SentenceTransformer.encode(error)
+                  │                                          │
+                  │                                          ▼
+                  │                        get_relevant_memories(top_k=3, cos ≥ 0.6)
+                  │                                          │
+                  │                                          ▼
+                  │                        ANALYZER (gpt-4o-mini) → strict JSON
+                  │                        {error_class, root_cause, fix_hint}
+                  │                                          │
+                  │                                          ▼
+                  │                        save_memory(dedup at cos ≥ 0.85)
+                  │                                          │
+                  └────── PATCHER (gpt-4o) ◀─────────────────┘
+                          prompt = code + root cause + history + memories
+
+        every stage yields an event ──▶ WebSocket ──▶ React (Monaco + cards + memory table)
+```
+
+**Stack:** FastAPI, OpenAI (gpt-4o generator/patcher + gpt-4o-mini analyzer), sentence-transformers `all-MiniLM-L6-v2` (384-dim), scikit-learn cosine similarity, MySQL 9.0 via aiomysql, React 18 + Vite + Tailwind + Monaco, Docker Compose. Python 3.11.
+
+**Structure** — 235 statements across the agent and db packages, 1,256 lines of backend Python, 915 lines of frontend:
+
+```
+backend/
+├── api.py              lifespan-managed model + pool, /health, /memories, WS /ws/run
+├── agent/
+│   ├── agent_loop.py       the generate→test→analyse→patch orchestrator
+│   ├── agent_context.py    per-session state + three prompt builders + parser
+│   ├── llm_client.py       async OpenAI wrapper (streaming + non-streaming)
+│   ├── memory_store.py     embedding storage, cosine retrieval, dedup
+│   └── test_executor.py    subprocess pytest runner + output parsing
+├── db/
+│   ├── connection.py       aiomysql pool (minsize=5, maxsize=20)
+│   └── schema.sql          memories / fix_attempts / runs
+└── tests/                  21 tests, 259 lines
+frontend/src/               8 components + useAgentSocket hook
+```
+
+---
+
+## 2. What's genuinely well done
+
+**The three LLM roles have genuinely separate context windows.** This is the architectural decision worth talking about. The generator sees only the task plus a one-line summary of the last failure. The analyzer sees code + error + retrieved memories. The patcher sees code + root cause + full iteration history + memories. Nobody passes a growing conversation transcript, so token cost stays roughly flat as iterations accumulate instead of growing quadratically. `AgentContext.iteration_history` stores a compressed `IterationSummary` per iteration — error type, 150 chars of attempted fix, result — rather than raw transcripts.
+
+**Structured JSON critique instead of prose.** The analyzer's system prompt pins an exact schema (`error_class`, `root_cause`, `fix_hint`) and the loop parses it with a graceful fallback:
+
+```python
+try:
+    analysis_data = json.loads(analysis_raw)
+    ...
+except (json.JSONDecodeError, AttributeError):
+    error_class = test_result.error_type   # falls back to regex-extracted type
+    root_cause  = analysis_raw[:200]
+```
+
+The failure path degrades to the deterministic regex-extracted error type rather than crashing the run. That's the right instinct — treating LLM output as untrusted input.
+
+**Semantic dedup, not just semantic retrieval.** Two thresholds doing two different jobs: retrieval at cosine ≥ 0.6 (loose, "show me anything related"), dedup at ≥ 0.85 (tight, "this is the same mistake"). On a dedup hit it appends to `fix_attempts` and increments `success_count` rather than inserting a near-identical row. Without this the memory table would fill with 40 variants of the same `AssertionError` and retrieval quality would collapse. Most people implement retrieval and forget dedup entirely.
+
+**The UI streams two independent event types per iteration.** `iteration_failed` fires immediately so the card appears with test results; `iteration_analysis` arrives later and *patches* the same card with critic rows, with a shimmer placeholder in between. The frontend matches on `it.iteration === event.iteration`. This is a deliberate perceived-latency decision — the user sees test results while the analyzer LLM call is still in flight, instead of staring at nothing for two seconds.
+
+**Robust LLM output parsing.** `parse_llm_response` normalises heading levels (`### CODE`, `## CODE`, `#CODE`) with regex before splitting, then strips markdown fences three different ways — opening fence with optional language tag, closing fence, and orphaned fence lines. This is exactly the kind of defensive parsing that separates a demo from something that runs unattended, and it's clearly the product of watching real model output break the naive version.
+
+**Per-test-case granularity.** `_parse_test_cases` regexes pytest's `-v` output into `[{name, passed}]`, so the UI shows "3 / 5 tests failed" with individual pills rather than a binary pass/fail. Small feature, meaningfully better signal.
+
+**Socket lifecycle handled correctly.** `useAgentSocket` nulls `onmessage` and `onclose` on the previous socket *before* opening a new one, so stale callbacks from an abandoned run can't write into the new run's state. The `stop()` path nulls `onclose` before closing so the close handler doesn't fight the explicit status set. This is a real class of React bug that most people ship.
+
+**Genuine debugging recorded in git history.** All 15 commits landed on 2026-06-05 between 12:54 and 15:13 IST — the whole system was built in a single ~2.5-hour hackathon session, which makes the scope delivered more impressive rather than less. Five of those fifteen commits are fixes with specific causes: CPU-only PyTorch wheel to stop a 1GB+ download hanging the Docker build, `MYSQL_HOST` override for the container network, removing a `dotenv` override that was shadowing Docker env vars, and — the best one — *"correctly stream and apply patched code in subsequent iterations."* That last one is the interesting bug: the loop originally generated a patch but the next iteration re-ran the generator prompt instead of streaming the patcher's output, so fixes were silently discarded. The current code routes iteration ≥ 2 through `build_patcher_prompt` in the streaming path. Worth being able to tell that story.
+
+**Secrets hygiene.** `.env` untracked and never committed at any point in history (verified with `git log --all --full-history`), `.env.example` provided, `.dockerignore` explicitly excludes `.env` so it can't be baked into an image. Only 44 tracked files.
+
+**Test design.** `conftest.py` stubs the `openai` module via `sys.modules` so the suite imports and runs without the package installed or any API key present. Mock aiomysql pools are hand-built with correct `__aenter__`/`__aexit__` semantics. The memory tests construct actual normalised numpy vectors and assert real cosine behaviour above and below threshold rather than mocking the similarity function — that's testing the logic, not the mock.
+
+---
+
+## 3. Weaknesses
+
+Ordered by what an interviewer would probe first.
+
+**1. The "sandbox" is a temp directory, not a sandbox.** This is the big one. `run_tests()` writes LLM-generated code to a tempdir and runs it with `subprocess.run(["python", "-m", "pytest", ...])` on the host interpreter. There is no container, no seccomp, no user namespace, no network isolation, no memory or CPU limit. Generated code can read your filesystem, make network calls, or read `.env`. The only guards are `timeout=30` and automatic tempdir cleanup.
+
+To your credit, the module docstring says this explicitly:
+
+> The generated code is executed inside a temporary directory with no extra sandboxing beyond what the OS provides. Do **not** run this in a shared multi-tenant environment without additional isolation (e.g. Docker with `--network=none` and resource limits).
+
+Documenting a known limitation honestly is much better than pretending. But **do not use the word "sandboxed" on your resume** — it invites exactly one follow-up question and the honest answer contradicts the bullet. "Isolated subprocess with a timeout" is accurate and still sounds competent. See §6 for how to answer the question.
+
+**2. Full-table scan on every memory retrieval.** `get_relevant_memories` runs `SELECT id, error_text, embedding, success_count FROM memories` with no `LIMIT` and no `WHERE`, parses every embedding out of JSON, and builds an N×384 numpy array — per iteration, per run, per user. Then `save_memory` calls it *again* for the dedup check, so it's two full scans per failed iteration. The module docstring correctly flags this as fine below ~10k rows, but this is the scaling question you'll be asked.
+
+**3. The concurrency story doesn't survive contact with `--workers 4`.** The README and the plan claim 50 concurrent users. Each of the 4 uvicorn workers is a separate process, so each loads its own ~90MB copy of the embedding model and its own pool of up to 20 MySQL connections — a potential 80 connections against a default `max_connections` of 151. More importantly, the agent loop is only partly async: `run_tests()` is a **blocking** `subprocess.run` inside an async generator, so for up to 30 seconds it stalls the entire event loop of its worker, freezing every other WebSocket connection on that process. Under real concurrent load this is the bottleneck, and it's a one-line-ish fix (`asyncio.to_thread` or `asyncio.create_subprocess_exec`). Don't claim a concurrency number you haven't load-tested.
+
+**4. Nothing writes to the `runs` table.** It's defined in `schema.sql` with a `session_id` index, and `session_id` is generated per WebSocket connection and threaded through `AgentContext` — but no `INSERT` ever happens. Run history is not persisted; only the memory rows are. Either wire it up or drop the table.
+
+**5. The agent grades its own homework.** The generator writes both the implementation *and* the tests, so "all tests passed" means the code satisfies tests the same model invented. If the model misunderstands the task, it will write tests that encode the misunderstanding and then pass them. This is inherent to the design rather than a bug, and it's a genuinely interesting thing to discuss — but be ready, because it's the sharpest question available about the project. Mitigation would be a fixed held-out test set per task, or generating tests and implementation in separate calls that don't see each other.
+
+**6. Memory is written on failure but success is never recorded.** `save_memory(..., result="failed")` is the only call site in `agent_loop.py`. `success_count` is incremented only when `result == "passed"`, which never happens, so it stays 0 for every row. The winning fix — the one that actually made tests pass — is never stored. The memory therefore accumulates failed approaches rather than proven fixes, which inverts the intent. **This is the highest-value fix in the project** and it's maybe fifteen lines: on the passing branch, embed the error that preceded the fix and save with `result="passed"`.
+
+**7. `last_similarity` is a global field, not a per-query one.** It's overwritten on every dedup hit and displayed in the memory table as if it were that memory's intrinsic property. It actually means "the cosine score the last time anything matched this row," which is a slightly confusing thing to render as a stable column.
+
+**8. No CI.** There's no `.github/` directory. The 21 tests are real and they pass, but nothing enforces that they keep passing. The RAG project has a CI-enforced coverage gate; this one doesn't. A ~20-line GitHub Actions workflow running pytest would let you make the same "CI-enforced" claim here.
+
+**9. Hardcoded `localhost:8000` in the frontend.** Three places — `useAgentSocket.js`, `App.jsx`, and `MemoryLog.jsx` — hardcode the backend URL, so the Docker Compose frontend only works when accessed from the host machine. Should be `import.meta.env.VITE_API_URL`. Related: `MemoryLog.jsx` appears to be dead code, superseded by `MemoryTable.jsx` (which is what `App.jsx` actually renders) but still duplicating the same fetch logic. Delete it.
+
+**10. WebSocket errors leak raw exception strings to the client.** `except Exception as e: send_json({"type": "error", "message": str(e)})` will happily forward a MySQL error containing connection details or a stack-trace fragment to the browser. Log server-side, send a generic message.
+
+**11. No auth or rate limiting on `/ws/run`.** Every run costs real OpenAI money across up to 10 iterations × 3 calls. An open WebSocket endpoint that spends money per connection is a billing incident waiting to happen if it's ever exposed publicly.
+
+**12. `llm_client.py` at 50% coverage and `db/connection.py` at 0%.** The two modules that touch the network are the two least covered. Understandable — they're thin wrappers over external services — but worth knowing before someone points at the coverage report.
+
+---
+
+## 4. Resume claims — what's safe to say
+
+You have no existing bullets for this project, so nothing needs correcting. This is what the repository will support under scrutiny:
+
+### Safe — directly verifiable from the code
+
+| Claim | Evidence |
+|---|---|
+| Three separated LLM roles with independent context windows | `build_generator_prompt`, `build_analyzer_prompt`, `build_patcher_prompt` |
+| gpt-4o for generation/patching, gpt-4o-mini for analysis | `agent_loop.py` model arguments |
+| Semantic memory: 384-dim embeddings, cosine retrieval at 0.6, dedup at 0.85 | `memory_store.py` defaults |
+| Token-by-token streaming over WebSocket to Monaco | `call_llm_stream` → `token` events → `useAgentSocket` |
+| Structured JSON critique with graceful fallback | `build_analyzer_prompt` schema + `try/except` in the loop |
+| Per-test-case pass/fail parsing | `_parse_test_cases` |
+| 21 tests, 87% coverage on agent + db, 2.1s runtime, zero API cost | ran it; `conftest.py` stubs openai |
+| 235 statements, 1,256 lines backend, 915 lines frontend | coverage report + `wc -l` |
+| Containerized: MySQL 9.0 + backend + frontend, healthcheck-gated startup | `docker-compose.yml` |
+| aiomysql pool, 5–20 connections, lifespan-managed | `connection.py`, `api.py` |
+| Embedding model loaded once per worker at startup | `api.py` lifespan |
+| Iteration cap configurable 1–10, clamped server-side | `api.py` |
+
+### Avoid these
+
+| Don't say | Why |
+|---|---|
+| **"sandboxed"** execution | It's a tempdir + 30s timeout on the host interpreter. Your own docstring says so. Use "isolated subprocess with timeout enforcement." |
+| **"supports 50 concurrent users"** | Never load-tested, and `subprocess.run` blocks the worker's event loop for up to 30s. The number came from the plan document, not a measurement. |
+| **"learns across sessions"** without qualification | True in the narrow sense that memory persists in MySQL — but since only *failures* are saved (§3.6), what persists is a record of failed approaches. Fix that first, then the claim gets much stronger. |
+| Any accuracy or success-rate figure | Nothing in the repo measures how often the agent actually solves a task. |
+
+### The one number worth earning
+
+You have no metric for the thing the project is actually about: **does the memory help?** That's a weekend's work and it would become the strongest line on your resume:
+
+Run 30 tasks with `threshold=0.6` (memory on) and 30 with the retrieval call stubbed to return `[]` (memory off). Record mean iterations-to-pass and solve rate for each. If memory helps, you get to write "reduced mean iterations-to-solution from X to Y across N tasks (Z% fewer LLM calls)" — a measured claim about your own novel component. If it doesn't help, that's a more interesting interview answer than most people have, and it tells you to fix §3.6 first.
+
+Fix the success-path memory write before running this, or you'll be measuring the wrong thing.
+
+---
+
+## 5. Numbers you can cite safely
+
+| Metric | Value | Verified how |
+|---|---|---|
+| Test suite | 21 tests, 100% passing | ran it |
+| Coverage (agent + db) | 87% | `pytest --cov` |
+| Per-module coverage | agent_context 100%, test_executor 98%, agent_loop 92%, memory_store 86% | coverage report |
+| Test runtime | 2.1s, zero API cost | ran it; openai stubbed in `conftest.py` |
+| Application size | 235 statements; 1,256 lines backend Python, 915 lines frontend | coverage + `wc -l` |
+| API surface | 2 HTTP endpoints + 1 WebSocket | `api.py` |
+| Event types streamed | 7 (`token`, `status`, `iteration_failed`, `iteration_analysis`, `complete`, `max_iterations_reached`, `error`) | `agent_loop.py` + hook |
+| Embeddings | all-MiniLM-L6-v2, 384-dim | `api.py`, tests |
+| Retrieval | top_k = 3, cosine ≥ 0.6 | `memory_store.py` |
+| Dedup | cosine ≥ 0.85 | `memory_store.py` |
+| Models | gpt-4o (generate/patch), gpt-4o-mini (analyse), temp 0.2 | `agent_loop.py`, `llm_client.py` |
+| Test timeout | 30s per subprocess run | `test_executor.py` |
+| Iteration cap | default 5, clamped 1–10 | `api.py` |
+| DB pool | aiomysql, minsize 5 / maxsize 20, autocommit | `connection.py` |
+| Frontend | 8 components + 1 hook, React 18 + Vite + Tailwind + Monaco | `frontend/src` |
+| Repo | 44 tracked files, 15 commits, no secrets in history | `git ls-files`, `git log --all` |
+| Build window | all commits 2026-06-05, 12:54–15:13 IST (~2.5 hours) | `git log --date=iso` |
+
+---
+
+## 6. Interview preparation
+
+**"Walk me through the architecture."** — Task comes in over a WebSocket. Generator (gpt-4o) streams code and tests token-by-token to the browser. Tests run in a subprocess; if they pass, done. If not, the error text is embedded with MiniLM and used to query a MySQL-backed memory of past failures by cosine similarity. Retrieved matches are injected into an analyzer prompt (gpt-4o-mini) that returns structured JSON — error class, root cause, fix hint — and then into a patcher prompt (gpt-4o) that rewrites the code. Loop repeats up to N times. The key design point is that the three roles have separate, purpose-built context windows rather than a shared growing transcript, so token cost per call stays roughly flat across iterations.
+
+**"Is executing LLM-generated code safe?"** — *The question you will definitely get. Answer it before they push.* No, and I documented that in the module. It runs pytest in a temp directory on the host interpreter with a 30-second timeout — that stops infinite loops, and cleanup is guaranteed by the context manager, but it does not stop filesystem or network access. It's acceptable for a single-user local tool and not acceptable for anything multi-tenant. The fix is running each execution in a throwaway container with `--network=none`, a read-only root filesystem, a memory cap, and a non-root user — or gVisor/Firecracker if I wanted real kernel isolation. I chose not to build that because the project was about the learning loop, not the isolation layer, and I'd rather state the limitation than imply I'd solved it. **Volunteering this is worth more than being caught by it.**
+
+**"How does the memory actually work, and does it help?"** — Error text is embedded to 384 dimensions with all-MiniLM-L6-v2, stored in MySQL as JSON. Retrieval is cosine similarity in Python at a 0.6 threshold, top 3. There's a second, tighter threshold at 0.85 for dedup, so semantically identical errors append a fix attempt to the existing row instead of creating a new one. Then be honest: I haven't yet A/B'd memory-on versus memory-off, so I can't give you a number for how much it helps — that's the next thing I'd measure, and I'd measure it as mean iterations-to-solution across a fixed task set.
+
+**"The agent writes its own tests — isn't that circular?"** — Yes, and it's the real limitation of the design. Passing means the code satisfies tests the same model wrote, so a misunderstood requirement produces tests that encode the misunderstanding. It validates internal consistency, not correctness against intent. The fix is a held-out test set per task that the generator never sees, or at minimum generating tests in a separate call with no visibility into the implementation. *Say this before they say it.*
+
+**"How would you scale the memory search?"** — Right now every retrieval pulls the whole table and computes cosine similarity in numpy — two full scans per failed iteration, since dedup calls the same function. Fine at hundreds of rows, wrong at a hundred thousand. I'd move to pgvector or Qdrant with an ANN index, or MySQL 9's native `VECTOR` type, and add an approximate index so it's sublinear. I'd also scope retrieval by task type so a Fibonacci off-by-one doesn't get matched against an unrelated parsing bug.
+
+**"You said it handles concurrent users — how do you know?"** — *Don't claim this.* If asked about concurrency: the design is session-isolated (one `AgentContext` per socket, no shared mutable state) and the DB pool is sized 5–20, but I haven't load-tested it, and there's a known blocker — the pytest subprocess call is synchronous inside an async generator, so it stalls that worker's event loop for up to 30 seconds. I'd move it to `asyncio.to_thread` before making any concurrency claim.
+
+**"What was the hardest bug?"** — Patched code was being generated and then silently discarded. The loop streamed from the generator prompt on every iteration, so the patcher's output — the actual fix, informed by the root-cause analysis and retrieved memories — never made it into the next test run. The agent looked like it was iterating but was really just resampling the generator. Fix was routing iterations ≥ 2 through the patcher prompt in the streaming path, which is why the git history has a commit named exactly that.
+
+---
+
+## 7. Highest-value next steps
+
+In order of return on effort:
+
+1. **Save successful fixes to memory** (~15 lines). Currently only failures are stored, so `success_count` is permanently 0 and the memory records what *didn't* work. This is the fix that makes "self-improving" fully honest.
+2. **Measure memory-on vs memory-off** (~a weekend). Gives you the one metric the project is missing and the strongest bullet on your resume.
+3. **Add GitHub Actions running pytest** (~20 lines). Lets you say "CI-enforced" like your RAG project.
+4. **Move `run_tests` off the event loop** with `asyncio.to_thread` (~1 line). Removes the concurrency blocker and makes any future load-test claim defensible.
+5. **Containerize the executor** with `--network=none` and resource limits. Turns your biggest weakness into your best answer.
+6. **Wire up the `runs` table or delete it.** Dead schema invites questions with no good answer.

@@ -14,11 +14,24 @@ Task → Generate code (GPT-4o streaming) → Run pytest
 
 Each failure is embedded with `sentence-transformers` and stored in MySQL. On the next similar error, the agent retrieves the closest past mistake and its fix, passing it as context to the analyser and patcher — making it genuinely self-improving over time.
 
+### Memory write policy
+
+Two thresholds do two different jobs:
+
+| Threshold | Purpose |
+|---|---|
+| cosine ≥ 0.60 | **Retrieval** — top-3 similar past errors injected into analyser/patcher prompts |
+| cosine ≥ 0.85 | **Deduplication** — treat as the same mistake; append a fix attempt instead of inserting a new row |
+
+Every failure is written with `result="failed"`. When a later iteration **passes**, the preceding failure is written again with `result="passed"` — which dedups onto the same row and increments its `success_count`. That's what makes the store a record of fixes that *worked*, rather than only of approaches that didn't.
+
 ## Features
 
 - **Live streaming** — generated code appears token-by-token in the Monaco editor
-- **Structured critic** — each failed iteration shows an LLM-generated error class, root cause, and fix hint
-- **Semantic memory** — cosine similarity search over past failures (threshold-based retrieval)
+- **Structured critic** — the analyser returns strict JSON (`error_class`, `root_cause`, `fix_hint`) with a deterministic regex fallback if parsing fails
+- **Two-phase iteration cards** — test results render immediately via `iteration_failed`; LLM critique arrives separately via `iteration_analysis` and patches the same card, so the UI never blocks on the analyser call
+- **Semantic memory** — cosine similarity search with separate retrieval and dedup thresholds
+- **Per-test granularity** — pytest `-v` output is parsed into individual pass/fail pills
 - **Memory table** — live table of all stored mistakes with similarity bars
 - **Light-mode UI** — React + Tailwind, Monaco editor, status bar with token estimates
 
@@ -30,9 +43,30 @@ Each failure is embedded with `sentence-transformers` and stored in MySQL. On th
 | Backend | FastAPI, Python 3.11, WebSockets |
 | LLM | OpenAI GPT-4o (generator/patcher) + GPT-4o-mini (analyser) |
 | Embeddings | `sentence-transformers` (`all-MiniLM-L6-v2`) |
-| Database | MySQL 8 via `aiomysql` |
-| Testing | pytest + pytest-asyncio |
+| Database | MySQL 9.0 via `aiomysql` |
+| Testing | pytest + pytest-asyncio (23 tests, 89% coverage) |
+| Lint/CI | ruff + GitHub Actions, coverage gate at 85% |
 | Infra | Docker Compose |
+
+## API
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/health` | Liveness probe |
+| `GET` | `/memories` | 50 most recent memory entries with their latest fix attempt |
+| `WS` | `/ws/run` | Send `{"task": "...", "max_iterations": 5}`; receive the event stream below |
+
+### WebSocket events
+
+| Event | Payload |
+|---|---|
+| `token` | One streamed LLM token for the live editor |
+| `status` | Phase message (`Generating code...`, `Running tests...`, `Analyzing error...`) |
+| `iteration_failed` | Code, test output, per-test cases, error type, similarity score, memory hit flag |
+| `iteration_analysis` | `error_class`, `root_cause`, `fix_hint` — patches the matching card |
+| `complete` | Final passing code, tests, per-test cases, total iterations |
+| `max_iterations_reached` | Last code and error after exhausting retries |
+| `error` | Server-side failure message |
 
 ## Quick Start (Docker)
 
@@ -76,8 +110,21 @@ npm run dev
 **Tests**
 ```bash
 cd backend
-pytest tests/ -v
+pytest tests/ -v --cov=agent --cov=db     # 23 tests, 89% coverage, ~2s
+ruff check .                              # lint
 ```
+
+The suite stubs `openai` at import time (see `tests/conftest.py`) and mocks the
+aiomysql pool, so it runs with no API key, no database, and zero API cost.
+
+## Security note
+
+`test_executor.py` runs LLM-generated code via `subprocess` in a temporary
+directory with a 30-second timeout. That bounds runtime and guarantees cleanup,
+but it is **not a sandbox** — there is no container, network isolation, or
+resource limit, so generated code can read the filesystem and make network
+calls. Fine for local single-user use; add Docker with `--network=none`,
+a read-only root filesystem, and memory limits before exposing it to anyone else.
 
 ## Environment Variables
 
@@ -107,21 +154,32 @@ self-improving-agent/
 │   ├── db/
 │   │   ├── connection.py      # aiomysql connection pool
 │   │   └── schema.sql         # table definitions
-│   ├── tests/                 # pytest test suite (21 tests)
+│   ├── tests/                 # pytest test suite (23 tests)
 │   ├── api.py                 # FastAPI app (HTTP + WebSocket)
+│   ├── ruff.toml              # pinned lint rule set
 │   └── requirements.txt
-└── frontend/
-    └── src/
-        ├── components/
-        │   ├── LeftPanel.jsx      # task input + live code editor
-        │   ├── TaskInput.jsx      # prompt textarea + controls
-        │   ├── IterationCard.jsx  # per-iteration result card
-        │   ├── MemoryTable.jsx    # bottom memory log table
-        │   ├── StatusBar.jsx      # status line
-        │   └── CodePanel.jsx      # Monaco editor wrapper
-        └── hooks/
-            └── useAgentSocket.js  # WebSocket state management
+├── frontend/
+│   └── src/
+│       ├── components/
+│       │   ├── LeftPanel.jsx      # task input + live code editor
+│       │   ├── TaskInput.jsx      # prompt textarea + controls
+│       │   ├── IterationFeed.jsx  # iteration card list
+│       │   ├── IterationCard.jsx  # per-iteration result card
+│       │   ├── MemoryTable.jsx    # bottom memory log table
+│       │   ├── StatusBar.jsx      # status line
+│       │   └── CodePanel.jsx      # Monaco editor wrapper
+│       └── hooks/
+│           └── useAgentSocket.js  # WebSocket state management
+└── .github/workflows/ci.yml   # ruff + pytest w/ coverage gate, frontend build
 ```
+
+## Known limitations
+
+- **Execution is not sandboxed** — see the security note above.
+- **Memory search is a full table scan.** `get_relevant_memories` loads every row and computes cosine similarity in numpy. Fine below ~10k rows; needs pgvector/Qdrant or MySQL 9's native `VECTOR` type beyond that.
+- **The agent writes its own tests.** Passing means the code satisfies tests the same model generated, so it validates internal consistency rather than correctness against intent. A held-out test set per task would fix this.
+- **The `runs` table is defined but never written to.** Run history is not yet persisted; only memory rows are.
+- **No load testing.** The architecture is session-isolated, but no concurrency claim has been measured.
 
 ## License
 
