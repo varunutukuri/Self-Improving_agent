@@ -15,7 +15,15 @@ iteration_failed   — iteration result with per-test cases; critic rows arrive
 iteration_analysis — structured critic output: error_class, root_cause, fix_hint
 complete           — all tests passed; includes final code + per-test cases
 max_iterations_reached — agent exhausted all retries
+
+Memory write policy
+-------------------
+Every failure is written with result="failed".  When a later iteration passes,
+the *preceding* failure is written again with result="passed", which dedups onto
+the same memory row and increments its success_count.  This is what makes the
+store a record of fixes that worked rather than only of approaches that didn't.
 """
+import asyncio
 import json
 from typing import AsyncGenerator
 
@@ -49,6 +57,11 @@ async def run_agent(
     """
     context = AgentContext(task=task, session_id=session_id, max_iterations=max_iterations)
 
+    # Carries the most recent failure forward so that, when a later iteration
+    # passes, the fix that actually worked can be written back to memory with
+    # result="passed".  None until the first failure occurs.
+    pending_failure: dict | None = None
+
     for iteration in range(1, context.max_iterations + 1):
 
         # ------------------------------------------------------------------ #
@@ -74,9 +87,27 @@ async def run_agent(
         # Stage 2: Run pytest in a subprocess                                 #
         # ------------------------------------------------------------------ #
         yield {"type": "status", "iteration": iteration, "message": "Running tests..."}
-        test_result = run_tests(code, tests)
+        # run_tests() is blocking (subprocess.run with a 30s timeout).  Off-loading it
+        # to a worker thread keeps the event loop free, so a long-running test run in
+        # one session cannot freeze every other WebSocket connection on this worker.
+        test_result = await asyncio.to_thread(run_tests, code, tests)
 
         if test_result.passed:
+            # Record the fix that actually worked.  Because the error text is identical
+            # to the one already stored, this dedups onto the existing memory row,
+            # appends a fix_attempt with result="passed", and increments success_count.
+            # Without this the store only ever accumulates failed approaches.
+            if pending_failure is not None:
+                await save_memory(
+                    error_text=pending_failure["error_text"],
+                    embedding=pending_failure["embedding"],
+                    fix_text=pending_failure["fix_text"],
+                    result="passed",
+                    pool=pool,
+                    error_class=pending_failure["error_class"],
+                    root_cause=pending_failure["root_cause"],
+                )
+
             yield {
                 "type":             "complete",
                 "iteration":        iteration,
@@ -154,16 +185,28 @@ async def run_agent(
         # ------------------------------------------------------------------ #
         # Stage 5: Record history & save to memory store                     #
         # ------------------------------------------------------------------ #
+        fix_text = fix_hint[:_FIX_TEXT_MAX_CHARS] or root_cause[:_FIX_TEXT_MAX_CHARS]
+
         # Persist the error + attempted fix in the memory store
         await save_memory(
             error_text=test_result.output,
             embedding=error_embedding,
-            fix_text=fix_hint[:_FIX_TEXT_MAX_CHARS] or root_cause[:_FIX_TEXT_MAX_CHARS],
+            fix_text=fix_text,
             result="failed",
             pool=pool,
             error_class=error_class,
             root_cause=root_cause,
         )
+
+        # Carry this failure forward.  If the next iteration passes, the same error
+        # is re-saved with result="passed" so the memory records the winning fix.
+        pending_failure = {
+            "error_text":  test_result.output,
+            "embedding":   error_embedding,
+            "fix_text":    fix_text,
+            "error_class": error_class,
+            "root_cause":  root_cause,
+        }
 
         # Record what was tried so the next patcher prompt can reference it
         context.update_history(
