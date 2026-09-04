@@ -1,8 +1,11 @@
-import pytest
 import json
+from unittest.mock import AsyncMock, MagicMock
+
 import numpy as np
-from unittest.mock import AsyncMock, MagicMock, patch
-from agent.memory_store import get_relevant_memories, save_memory, _get_fix_attempts
+import pytest
+
+from agent.memory_store import _get_fix_attempts, get_relevant_memories, save_memory
+
 
 def make_pool(rows=None, lastrowid=1):
     """Build a mock aiomysql pool that returns the given rows from fetchall."""
@@ -29,7 +32,6 @@ async def test_get_relevant_memories_empty_db():
 
 @pytest.mark.asyncio
 async def test_get_relevant_memories_below_threshold():
-    embedding = np.zeros(384).tolist()
     stored = np.ones(384)
     stored_norm = (stored / np.linalg.norm(stored)).tolist()
     rows = [(1, "stored error", json.dumps(stored_norm), 0)]

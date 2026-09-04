@@ -1,4 +1,5 @@
-from agent.test_executor import run_tests, _extract_error_type, _extract_error_summary
+from agent.test_executor import _extract_error_summary, _extract_error_type, run_tests
+
 
 def test_passing_code():
     code = "def add(a, b):\n    return a + b\n"

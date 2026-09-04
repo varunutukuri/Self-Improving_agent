@@ -1,4 +1,5 @@
-from agent.agent_context import AgentContext, IterationSummary
+from agent.agent_context import AgentContext
+
 
 def test_build_generator_prompt_first_iteration():
     ctx = AgentContext(task="Write a sort function", session_id="abc")

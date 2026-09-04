@@ -24,8 +24,8 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from sentence_transformers import SentenceTransformer
 
-from db.connection import get_pool, close_pool
 from agent.agent_loop import run_agent
+from db.connection import close_pool, get_pool
 
 # ---------------------------------------------------------------------------
 # Module-level singletons — populated by the lifespan handler below.
