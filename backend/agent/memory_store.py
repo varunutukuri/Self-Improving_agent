@@ -94,9 +94,8 @@ async def save_memory(
     Persist an error + fix attempt to the memory store.
 
     If a sufficiently similar memory already exists (similarity ≥
-    *dedup_threshold*), a new ``fix_attempts`` row is appended to it,
-    its ``success_count`` is incremented when *result* is ``"passed"``,
-    and ``last_similarity`` is updated with the current cosine score.
+    *dedup_threshold*), a new ``fix_attempts`` row is appended to it and its
+    ``success_count`` is incremented when *result* is ``"passed"``.
     Otherwise a fresh ``memories`` row is inserted.
 
     Parameters
@@ -119,17 +118,18 @@ async def save_memory(
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
             if existing:
-                # Duplicate found — append fix attempt and update similarity record
-                mem_id     = existing[0]["id"]
-                similarity = existing[0]["similarity"]
+                # Duplicate found — append this attempt to the existing memory.
+                #
+                # NOTE: last_similarity is deliberately NOT written here. The score
+                # for a dedup match is ~1.0 by construction (the error text is
+                # near-identical), so recording it would pin every row to 100% and
+                # make the column meaningless. It is set by update_last_similarity()
+                # at retrieval time instead, where the score is informative.
+                mem_id = existing[0]["id"]
 
                 await cur.execute(
                     "INSERT INTO fix_attempts (memory_id, fix_text, result) VALUES (%s, %s, %s)",
                     (mem_id, fix_text, result),
-                )
-                await cur.execute(
-                    "UPDATE memories SET last_similarity = %s WHERE id = %s",
-                    (similarity, mem_id),
                 )
                 if result == "passed":
                     await cur.execute(
@@ -148,6 +148,29 @@ async def save_memory(
                     "INSERT INTO fix_attempts (memory_id, fix_text, result) VALUES (%s, %s, %s)",
                     (mem_id, fix_text, result),
                 )
+
+
+async def update_last_similarity(memory_id: int, similarity: float, pool) -> None:
+    """
+    Record the cosine score from the most recent *retrieval* match.
+
+    This is the number worth surfacing in the UI: how closely this stored
+    mistake matched a genuinely new error. Deduplication scores are excluded on
+    purpose — those compare a memory against a near-identical copy of itself and
+    are ~1.0 regardless of how useful the memory is.
+
+    Parameters
+    ----------
+    memory_id:  Primary key of the ``memories`` row that was retrieved.
+    similarity: Cosine similarity between the new error and this memory.
+    pool:       aiomysql connection pool.
+    """
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "UPDATE memories SET last_similarity = %s WHERE id = %s",
+                (similarity, memory_id),
+            )
 
 
 async def _get_fix_attempts(memory_id: int, pool) -> list[dict]:

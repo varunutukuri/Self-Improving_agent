@@ -16,9 +16,9 @@ So the honest heading is `Jun 2026`, not a multi-month range. This is not a weak
     \resumeItemListStart
         \resumeItem{Built an autonomous coding agent that generates Python solutions with pytest tests, executes them in an isolated subprocess with timeout enforcement, and iteratively rewrites failing code across a configurable 1--10 iteration loop until tests pass.}
         \resumeItem{Architected three specialised LLM roles with independent context windows --- generator and patcher on GPT-4o, analyser on GPT-4o-mini --- passing compressed per-iteration summaries rather than a growing transcript, keeping token cost per call flat as iterations accumulate.}
-        \resumeItem{Engineered a semantic mistake memory using \texttt{sentence-transformers} (all-MiniLM-L6-v2, 384-dim) and scikit-learn cosine similarity over MySQL, with dual thresholds --- 0.6 for top-3 retrieval and 0.85 for deduplication --- so recurring errors append to an existing memory instead of flooding the store with near-identical rows.}
-        \resumeItem{Constrained the analyser to a strict JSON schema (error class, root cause, fix hint) with a deterministic regex-based fallback on malformed output, and streamed seven distinct event types over WebSockets to a React + Monaco UI that renders test results immediately and patches in LLM critique as it arrives.}
-        \resumeItem{Validated with a 21-test pytest suite at 87\% coverage across the agent and database packages, running in 2.1s at zero API cost with OpenAI stubbed at import; containerized the full stack (MySQL 9.0, FastAPI, React) with Docker Compose and healthcheck-gated startup ordering.}
+        \resumeItem{Engineered a semantic mistake memory using \texttt{sentence-transformers} (all-MiniLM-L6-v2, 384-dim) and scikit-learn cosine similarity over MySQL, with dual thresholds --- 0.6 for top-3 retrieval and 0.85 for deduplication --- so recurring errors append to an existing memory instead of flooding the store with near-identical rows; verified end-to-end by a stored mistake being retrieved at 68\% similarity against a different task and applied to fix it.}
+        \resumeItem{Constrained the analyser to a strict JSON schema (error class, root cause, fix hint) with a deterministic regex-based fallback on malformed output, and streamed eight distinct event types over WebSockets to a React + Monaco UI that renders test results immediately and patches in LLM critique as it arrives.}
+        \resumeItem{Validated with a 25-test pytest suite at 91\% coverage across the agent and database packages, running in 3s at zero API cost with OpenAI stubbed at import; enforced via GitHub Actions running ruff and a 85\% coverage gate, and containerized the full stack (MySQL 9.0, FastAPI, React) with Docker Compose and healthcheck-gated startup ordering.}
     \resumeItemListEnd
 ```
 
@@ -30,8 +30,8 @@ So the honest heading is `Jun 2026`, not a multi-month range. This is not a weak
     \resumeProjectHeading{Self-Improving Code Generation Agent}{Jun 2026}
     \resumeItemListStart
         \resumeItem{Built an autonomous coding agent using FastAPI and GPT-4o that generates Python code with pytest tests, runs them in an isolated subprocess with timeout enforcement, and self-corrects failures via three specialised LLM roles (generator, analyser, patcher) with independent context windows.}
-        \resumeItem{Engineered a semantic mistake memory with \texttt{sentence-transformers} embeddings and cosine similarity over MySQL, using separate retrieval (0.6) and deduplication (0.85) thresholds so the agent reuses fixes for recurring error patterns instead of storing near-duplicate failures.}
-        \resumeItem{Streamed live iteration events (code tokens, per-test results, structured JSON critique) over WebSockets to a React + Monaco frontend; validated with a 21-test pytest suite at 87\% coverage running in 2.1s at zero API cost, containerized with Docker Compose.}
+        \resumeItem{Engineered a semantic mistake memory with \texttt{sentence-transformers} embeddings and cosine similarity over MySQL, using separate retrieval (0.6) and deduplication (0.85) thresholds so the agent reuses fixes for recurring error patterns instead of storing near-duplicate failures --- demonstrated by a stored mistake matching a different task at 68\% similarity and being applied to solve it.}
+        \resumeItem{Streamed live iteration events (code tokens, per-test results, structured JSON critique) over WebSockets to a React + Monaco frontend; validated with a 25-test pytest suite at 91\% coverage running at zero API cost, gated in CI by GitHub Actions with ruff and an 85\% coverage threshold, and containerized with Docker Compose.}
     \resumeItemListEnd
 ```
 
@@ -71,8 +71,9 @@ So the honest heading is `Jun 2026`, not a multi-month range. This is not a weak
 |---|---|---|
 | "sandboxed execution" | "isolated subprocess with timeout enforcement" | It's a tempdir on the host interpreter — no container, no network isolation, no resource caps. Your own module docstring says so. One follow-up question and the claim collapses. |
 | "supports 50 concurrent users" | omit entirely, or "session-isolated architecture" | Never load-tested, and `subprocess.run` blocks the worker event loop for up to 30s. The number came from the planning doc, not a measurement. |
-| "learns from experience across sessions" | "retrieves and reuses prior error patterns" | Memory persists, but only *failures* are currently written — `success_count` stays 0 for every row. Fix that (§7.1 of the review) and the stronger phrasing becomes honest. |
+| ~~"learns from experience across sessions"~~ | **now safe to say** | ✅ Fixed. Successful fixes are written with `result="passed"` and verified incrementing `success_count` against a live MySQL row. Memory persists across runs and across restarts, and retrieval was demonstrated firing at 68% on an unrelated task. |
 | "reduced iterations by X%" | nothing yet | No A/B measurement exists. See below — it's cheap to earn. |
+| "self-healing" / "fully autonomous" | "iteratively self-corrects" | The agent writes its own tests, so a red test can be made green by weakening the test — observed live. Overclaiming autonomy invites exactly that question. |
 
 ---
 
@@ -80,7 +81,7 @@ So the honest heading is `Jun 2026`, not a multi-month range. This is not a weak
 
 The project's central claim is that semantic memory makes the agent better, and right now nothing measures that. It's a weekend of work:
 
-1. Fix the success-path memory write first (§7.1 of `PROJECT_REVIEW.md`) — otherwise you're measuring a memory that only contains failed approaches.
+1. ~~Fix the success-path memory write first~~ — ✅ done, so the store now contains fixes that worked. The benchmark will measure the right thing.
 2. Pick 30 tasks spanning a few error classes (off-by-one, indexing, type coercion, recursion depth).
 3. Run each twice: once normally, once with `get_relevant_memories` stubbed to return `[]`.
 4. Record mean iterations-to-pass, solve rate, and total LLM calls for each arm.

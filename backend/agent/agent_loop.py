@@ -30,7 +30,7 @@ from typing import AsyncGenerator
 
 from agent.agent_context import AgentContext
 from agent.llm_client import call_llm, call_llm_stream
-from agent.memory_store import get_relevant_memories, save_memory
+from agent.memory_store import get_relevant_memories, save_memory, update_last_similarity
 from agent.test_executor import run_tests
 
 # Max chars of analysis text stored in the memory store / history
@@ -142,6 +142,12 @@ async def run_agent(
         )
         context.current_memories = relevant_memories
         similarity_score = relevant_memories[0]["similarity"] if relevant_memories else None
+
+        # Stamp each retrieved memory with the score it earned against this NEW
+        # error.  This is what the UI's similarity column shows — a real measure
+        # of how well the memory generalised, rather than a dedup self-match.
+        for memory in relevant_memories:
+            await update_last_similarity(memory["id"], memory["similarity"], pool)
 
         # Emit the iteration result immediately so the UI card appears
         yield {

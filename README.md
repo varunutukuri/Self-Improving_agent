@@ -44,7 +44,7 @@ Every failure is written with `result="failed"`. When a later iteration **passes
 | LLM | OpenAI GPT-4o (generator/patcher) + GPT-4o-mini (analyser) |
 | Embeddings | `sentence-transformers` (`all-MiniLM-L6-v2`) |
 | Database | MySQL 9.0 via `aiomysql` |
-| Testing | pytest + pytest-asyncio (23 tests, 89% coverage) |
+| Testing | pytest + pytest-asyncio (25 tests, 91% coverage) |
 | Lint/CI | ruff + GitHub Actions, coverage gate at 85% |
 | Infra | Docker Compose |
 
@@ -111,7 +111,7 @@ npm run dev
 **Tests**
 ```bash
 cd backend
-pytest tests/ -v --cov=agent --cov=db     # 23 tests, 89% coverage, ~2s
+pytest tests/ -v --cov=agent --cov=db     # 25 tests, 91% coverage, ~3s
 ruff check .                              # lint
 ```
 
@@ -155,7 +155,7 @@ self-improving-agent/
 │   ├── db/
 │   │   ├── connection.py      # aiomysql connection pool
 │   │   └── schema.sql         # table definitions
-│   ├── tests/                 # pytest test suite (23 tests)
+│   ├── tests/                 # pytest test suite (25 tests)
 │   ├── api.py                 # FastAPI app (HTTP + WebSocket)
 │   ├── ruff.toml              # pinned lint rule set
 │   └── requirements.txt

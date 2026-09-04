@@ -11,7 +11,8 @@ CREATE TABLE IF NOT EXISTS memories (
     embedding       JSON         NOT NULL,
     error_class     VARCHAR(100) DEFAULT NULL,     -- short LLM-generated label
     root_cause      TEXT         DEFAULT NULL,     -- one-sentence root cause
-    last_similarity FLOAT        DEFAULT 0,        -- cosine score the last time this was retrieved
+    last_similarity FLOAT        DEFAULT 0,        -- cosine score the last time this matched a NEW error
+                                                   -- (retrieval only; dedup self-matches are excluded)
     success_count   INT          DEFAULT 0,
     created_at      TIMESTAMP    DEFAULT NOW()
 );
