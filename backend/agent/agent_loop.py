@@ -13,6 +13,7 @@ token              — one streamed LLM token for the live code editor
 iteration_failed   — iteration result with per-test cases; critic rows arrive
                      separately via iteration_analysis once LLM analysis is done
 iteration_analysis — structured critic output: error_class, root_cause, fix_hint
+memory_saved       — a memory row was just written; UI should refetch /memories
 complete           — all tests passed; includes final code + per-test cases
 max_iterations_reached — agent exhausted all retries
 
@@ -107,6 +108,9 @@ async def run_agent(
                     error_class=pending_failure["error_class"],
                     root_cause=pending_failure["root_cause"],
                 )
+                # Signal that the store has changed so the UI refetches AFTER the
+                # write, not before it.
+                yield {"type": "memory_saved", "iteration": iteration}
 
             yield {
                 "type":             "complete",
@@ -197,6 +201,11 @@ async def run_agent(
             error_class=error_class,
             root_cause=root_cause,
         )
+
+        # The row now exists — tell the UI to refetch.  This must come after
+        # save_memory(), not after iteration_failed, or the table queries the
+        # database before the write lands and renders one step behind.
+        yield {"type": "memory_saved", "iteration": iteration}
 
         # Carry this failure forward.  If the next iteration passes, the same error
         # is re-saved with result="passed" so the memory records the winning fix.

@@ -115,8 +115,15 @@ async def test_successful_fix_is_saved_to_memory_as_passed():
          patch("agent.agent_loop.save_memory", mock_save):
 
         from agent.agent_loop import run_agent
-        async for _ in run_agent("Write fib", "sess-3", model, pool):
-            pass
+        events = []
+        async for event in run_agent("Write fib", "sess-3", model, pool):
+            events.append(event)
+
+    # memory_saved must be emitted AFTER each write so the UI refetches once the
+    # row is actually committed, not before it.
+    types = [e["type"] for e in events]
+    assert types.count("memory_saved") == 2, f"expected 2 memory_saved, got {types}"
+    assert types.index("memory_saved") > types.index("iteration_failed")
 
     results = [c.kwargs["result"] for c in mock_save.call_args_list]
     assert results == ["failed", "passed"], f"expected one of each, got {results}"

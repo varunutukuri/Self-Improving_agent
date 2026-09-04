@@ -64,6 +64,7 @@ Every failure is written with `result="failed"`. When a later iteration **passes
 | `status` | Phase message (`Generating code...`, `Running tests...`, `Analyzing error...`) |
 | `iteration_failed` | Code, test output, per-test cases, error type, similarity score, memory hit flag |
 | `iteration_analysis` | `error_class`, `root_cause`, `fix_hint` — patches the matching card |
+| `memory_saved` | Emitted after a memory row is committed; the UI refetches `/memories` on this rather than on `iteration_failed`, which would query before the write lands |
 | `complete` | Final passing code, tests, per-test cases, total iterations |
 | `max_iterations_reached` | Last code and error after exhausting retries |
 | `error` | Server-side failure message |

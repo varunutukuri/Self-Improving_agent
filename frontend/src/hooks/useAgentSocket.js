@@ -9,6 +9,7 @@
  * status             → updates statusMessage + currentIteration
  * iteration_failed   → adds a card to iterations[] with analyzing=true
  * iteration_analysis → patches the matching card with critic rows
+ * memory_saved       → bumps memorySaveCount, which triggers a /memories refetch
  * complete           → adds a final passing card, sets status=complete
  * max_iterations_reached → sets status=error
  *
@@ -27,7 +28,7 @@ export function useAgentSocket() {
   const [currentIteration, setCurrentIteration] = useState(0);
   const [charCount,       setCharCount]       = useState(0);   // for token estimate
   const [memoryHitCount,  setMemoryHitCount]  = useState(0);
-  const [failedCount,     setFailedCount]     = useState(0);   // triggers memory refetch
+  const [memorySaveCount, setMemorySaveCount] = useState(0);   // triggers memory refetch
 
   const wsRef = useRef(null);
 
@@ -47,7 +48,7 @@ export function useAgentSocket() {
     setCurrentIteration(1);
     setCharCount(0);
     setMemoryHitCount(0);
-    setFailedCount(0);
+    setMemorySaveCount(0);
 
     const ws = new WebSocket("ws://localhost:8000/ws/run");
     wsRef.current = ws;
@@ -86,7 +87,13 @@ export function useAgentSocket() {
           ]);
           setStreamingCode("");
           if (event.memory_hit) setMemoryHitCount((prev) => prev + 1);
-          setFailedCount((prev) => prev + 1);   // triggers memory table refresh
+          break;
+
+        case "memory_saved":
+          // Fired by the backend AFTER the row is committed. Refetching on
+          // iteration_failed instead would query before the write lands and
+          // leave the table one step behind.
+          setMemorySaveCount((prev) => prev + 1);
           break;
 
         case "iteration_analysis":
@@ -152,7 +159,7 @@ export function useAgentSocket() {
     currentIteration,
     tokenEstimate,
     memoryHitCount,
-    failedCount,
+    memorySaveCount,
     runAgent,
     stop,
   };

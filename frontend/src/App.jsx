@@ -12,7 +12,7 @@ import StatusBar     from "./components/StatusBar";
 export default function App() {
   const {
     iterations, status, streamingCode, statusMessage,
-    currentIteration, tokenEstimate, memoryHitCount, failedCount,
+    currentIteration, tokenEstimate, memoryHitCount, memorySaveCount,
     runAgent, stop,
   } = useAgentSocket();
 
@@ -31,10 +31,10 @@ export default function App() {
     }
   }, []);
 
-  // Refresh memory table after every new failure
+  // Refresh the memory table once the backend confirms a row was written
   useEffect(() => {
-    if (failedCount > 0) fetchMemories();
-  }, [failedCount, fetchMemories]);
+    if (memorySaveCount > 0) fetchMemories();
+  }, [memorySaveCount, fetchMemories]);
 
   // Pre-populate on mount
   useEffect(() => { fetchMemories(); }, [fetchMemories]);
